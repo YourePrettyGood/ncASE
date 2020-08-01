@@ -1,3 +1,4 @@
+#!/usr/bin/env Rscript
 #usage: replicate_1_par_1 replicate_1_par_2 ... filter read_length output
 
 library(tidyverse)
@@ -26,14 +27,26 @@ snp_weight <- function(x, read_length) {
    return(data.frame(transcript=x$transcript, position=x$position, weight=weights, stringsAsFactors=FALSE))
 }
 
-if(length(args) < 5)
+#Argument list is:
+#1..n-4) pairs of .snps input files, so 1 and 2 are sample 1 mapped to
+# par1 and par2; 3 and 4 are sample 2 mapped to par1 and par2, etc.
+#n-3) filter threshold
+#n-2) read length for SNP proximity reweighting
+#n-1) output file name
+#n) flag to allow zero depth for either allele (but not both), default=0
+n_nonsample_args <- 4
+
+if(length(args) < 2+n_nonsample_args)
    stop("Need at least one pair of replicate files and output filename")
-if((length(args)-1) %% 2 != 0)
+if((length(args)-n_nonsample_args) %% 2 != 0)
    stop("Need two files per replicate")
 
-read_length <- as.numeric(args[length(args)-1]) 
+filter_threshold <- as.numeric(args[length(args)-3])
+read_length <- as.numeric(args[length(args)-2])
+output <- args[length(args)-1]
+allow_zero_depth <- args[length(args)]
 
-max_replicate <- (length(args)-3)/2
+max_replicate <- (length(args)-n_nonsample_args)/2
 
 transcript_count_list <- vector("list", max_replicate)
 
@@ -50,26 +63,36 @@ for(replicate in 1:max_replicate) {
    par2 <- read.table(args[2*replicate], quote="\"", col.names=par2_cols, colClasses=par_col_classes)
    cat(paste(nrow(par2), "par2 SNPs from input file\n"))
 
-   #Filter for par[12]ref_count > 0 && par[12]alt_count > 0, and
-   # set up a column as a join key, eliminating the redundant transcript
-   # and position columns:
-   par1 <- par1 %>% filter(par1ref_count * par1alt_count > 0) %>%
-      mutate(variant=paste(transcript, position, sep="_")) %>%
-      select(-c(transcript, position))
-   cat(paste(nrow(par1), "par1 SNPs after non-zero ref*alt count filter\n"))
-   #species_1 <- species_1[species_1$V5 * species_1$V6 > 0,]
-   par2 <- par2 %>% filter(par2ref_count * par2alt_count > 0) %>%
-      mutate(variant=paste(transcript, position, sep="_")) %>%
-      select(-c(transcript, position))
-   cat(paste(nrow(par2), "par2 SNPs after non-zero ref*alt count filter\n"))
-   #species_2 <- species_2[species_2$V5 * species_2$V6 > 0,]
+   if (allow_zero_depth == "0") {
+      #Filter for par[12]ref_count > 0 && par[12]alt_count > 0, and
+      # set up a column as a join key, eliminating the redundant transcript
+      # and position columns:
+      par1 <- par1 %>% filter(par1ref_count * par1alt_count > 0) %>%
+         mutate(variant=paste(transcript, position, sep="_")) %>%
+         select(-c(transcript, position))
+      cat(paste(nrow(par1), "par1 SNPs after non-zero ref*alt count filter\n"))
+      par2 <- par2 %>% filter(par2ref_count * par2alt_count > 0) %>%
+         mutate(variant=paste(transcript, position, sep="_")) %>%
+         select(-c(transcript, position))
+      cat(paste(nrow(par2), "par2 SNPs after non-zero ref*alt count filter\n"))
+   } else {
+      #Filter for par[12]ref_count > 0 || par[12]alt_count > 0, and
+      # set up a column as a join key, eliminating the redundant transcript
+      # and position columns:
+      par1 <- par1 %>% filter(par1ref_count > 0 | par1alt_count > 0) %>%
+         mutate(variant=paste(transcript, position, sep="_")) %>%
+         select(-c(transcript, position))
+      cat(paste(nrow(par1), "par1 SNPs after non-zero ref or alt count filter\n"))
+      par2 <- par2 %>% filter(par2ref_count > 0 | par2alt_count > 0) %>%
+         mutate(variant=paste(transcript, position, sep="_")) %>%
+         select(-c(transcript, position))
+      cat(paste(nrow(par2), "par2 SNPs after non-zero ref or alt count filter\n"))
+   }
 
    #Perform an inner join on the sets of SNPs identified by mapping to each
    # parent:
    snps <- inner_join(par1, par2, by="variant")
    cat(paste(nrow(snps), "SNPs after inner join of the two parent mappings\n"))
-   #snps <- inner_join(species_1 %>% mutate(match_col=paste(V1,V2,sep="_")), species_2 %>% mutate(match_col=paste(V1,V2,sep="_")),by="match_col")
-   #colnames(snps) <- c("transcript","position","species_1_ref","species_1_alt","species_1_species_1","species_1_species_2","variant","V1","V2","species_2_ref","species_2_alt","species_2_species_2","species_2_species_1")
 
    #Filter for SNPs with reciprocal ref and alt on the two parental
    # transcriptomes (e.g. par1ref == par2alt && par1alt == par2ref:
@@ -80,12 +103,8 @@ for(replicate in 1:max_replicate) {
       mutate(position=as.integer(position)) %>%
       arrange(transcript, position)
    cat(paste(nrow(snps), "SNPs after reciprocal parental allele filter\n"))
-   #snps <- snps %>% filter((species_1_ref == species_2_alt | species_2_alt == ".") & (species_1_alt == species_2_ref | species_1_alt == ".") & (species_1_alt != "." | species_2_alt != "."))
-   #snps <- snps %>% filter(species_1_ref == species_2_alt & species_1_alt == species_2_ref)
-   #snps <- snps %>% select("variant","transcript", "species_1_species_1","species_1_species_2","species_2_species_2","species_2_species_1","position")
 
    #Set thresholds for proximity of reciprocal mapping counts:
-   filter_threshold <- as.numeric(args[length(args)-2])
    #The old threshold+filter combination is equivalent to the following:
    #low_threshold <- (1 - filter_threshold)/(1 + filter_threshold)
    #high_threshold <- (1 + filter_threshold)/(1 - filter_threshold)
@@ -105,10 +124,6 @@ for(replicate in 1:max_replicate) {
    cat(paste(nrow(snps), "SNPs after adding high-pass par1alt filter\n"))
    snps <- snps %>% filter(par2ref_count < high_threshold * par1alt_count)
    cat(paste(nrow(snps), "SNPs after all reciprocal mapping counts filters\n"))
-   #snps <- snps[snps$species_1_species_1/(snps$species_1_species_1 + snps$species_2_species_1) > low_threshold
-   #                & snps$species_1_species_1/(snps$species_1_species_1 + snps$species_2_species_1) < high_threshold
-   #                & snps$species_2_species_2/(snps$species_1_species_2 + snps$species_2_species_2) > low_threshold
-   #                & snps$species_2_species_2/(snps$species_1_species_2 + snps$species_2_species_2) < high_threshold,]
 
    #Calculate a per-SNP weight based on distance in the transcript:
    transcripts <- unique(snps$transcript)
@@ -120,7 +135,6 @@ for(replicate in 1:max_replicate) {
    cat(paste("snps$transcript class", class(snps$transcript), "snps$position class", class(snps$position), "weight_df$transcript class", class(weight_df$transcript), "weight_df$position class", class(weight_df$position), "\n"))
    snps <- full_join(snps, weight_df, by=c("transcript", "position"))
    cat(paste("Joined SNP weights into main data.frame for replicate", replicate, "\n"))
-   #snps$weight <- sapply(snps$variant,myweight,data=snps)
 
    #Calculate weighted counts for each transcript:
    transcript_counts <- snps %>% group_by(transcript) %>%
@@ -132,53 +146,10 @@ for(replicate in 1:max_replicate) {
          par1_counts=(par1ref_counts+par2alt_counts)/2,
          par2_counts=(par1alt_counts+par2ref_counts)/2)
    cat(paste("Summarized per-parent transcript counts for", nrow(transcript_counts), "transcripts for replicate", replicate, "\n"))
-   #transcript_counts <- transcript_counts %>%
-   #   rename_if(is_numeric, function(x, replicate) {paste0("rep", replicate, sep="_")}, replicate)
    colnames(transcript_counts)[2:3] <- c(paste("rep", replicate, "par1", "counts", sep="_"), paste("rep", replicate, "par2", "counts", sep="_"))
    cat("Renamed count columns to include replicate\n")
    transcript_count_list[[replicate]] <- transcript_counts
-   #x <- aggregate(snps$species_1_species_1*snps$weight, by=list(snps$transcript), "sum")
-   #y <- aggregate(snps$species_2_species_1*snps$weight, by=list(snps$transcript), "sum")
-   #w <- aggregate(snps$species_1_species_2*snps$weight, by=list(snps$transcript), "sum")
-   #z <- aggregate(snps$species_2_species_2*snps$weight, by=list(snps$transcript), "sum")
-
-   #combined <- data.frame(x$Group.1, x$x, y$x, w$x, z$x)
-
-   #if (replicate == 1){
-   #   replicate_counts <- list(data.frame(x$Group.1,x.x=(x$x+y$x)/2,z.x=(w$x + z$x)/2))
-   #} else {
-   #   replicate_counts <- c(replicate_counts, list(data.frame(x$Group.1,x.x=(x$x+y$x)/2,z.x=(w$x + z$x)/2)))
-   #}
 }
-
-
-#temp <- replicate_counts[[1]]$x.Group.1
-
-#if (max_replicate > 1)
-#   for(replicate in 2:max_replicate) {
-#      temp <- replicate_counts[[replicate]]$x.Group.1[replicate_counts[[replicate]]$x.Group.1 %in% temp]
-#   }
-
-#for(replicate in 1:max_replicate){
-#  i <- replicate_counts[[replicate]][replicate_counts[[replicate]]$x.Group.1 %in% temp,]
-
-#  i <- i[order(as.character(i$x.Group.1)),]
-#  if(replicate==1){ 
-#    combined_i <- data.frame(i$x.Group.1, i$x.x, i$z.x)
-#  }else{
-#  combined_i <- data.frame(combined_i, i$x.x, i$z.x)
-#  }
-#}
-
-
-#labels <- c("transcript")
-#for(replicate in 1:max_replicate){
-#  labels <- c(labels, paste("replicate",replicate,"species_1",sep="_"),paste("replicate",replicate,"species_2",sep="_"))
-#}
-
-#names(combined_i) <- labels
-
-#write.table(combined_i, file=args[length(args)], quote=FALSE, sep="\t", row.names=FALSE) 
 
 #Join all the transcript count tables together and output:
 i <- 1
@@ -191,4 +162,4 @@ while (i <= max_replicate) {
    i <- i + 1
 }
 
-write.table(final_transcript_counts, file=args[length(args)], quote=FALSE, sep="\t", row.names=FALSE)
+write.table(final_transcript_counts, file=output, quote=FALSE, sep="\t", row.names=FALSE)
